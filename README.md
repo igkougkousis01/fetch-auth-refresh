@@ -11,9 +11,9 @@ request → attach token → fetch → not an auth failure? return it
 
 ## Status
 
-**v0.1.0 — first release, not yet published to npm.** The library is feature-complete for what it
-claims to do and covered by 78 tests, but the public API has not been used in anger by anyone but
-its author.
+**v0.1.0 — the first public release, available on npm.** The library is feature-complete for what
+it claims to do, and the implementation is covered by 78 deterministic tests. This is still a `0.x`
+API, and it may evolve in response to real-world usage.
 
 While the version is `0.x`, a **minor bump may contain breaking changes**. Pin an exact version if
 that matters to you. The surface is deliberately tiny — one function and six types — so the blast
@@ -68,9 +68,6 @@ That difference is not just about wasted calls:
 - **Zero runtime dependencies**, ESM-only, fully typed.
 
 ## Installation
-
-> **Not yet published.** This command is what installation *will* look like; it does not work today.
-> Until the first publish, install from the repository.
 
 ```bash
 npm install fetch-auth-refresh
@@ -155,8 +152,14 @@ Returns a `fetch`-compatible function. Throws a `TypeError` at construction time
 available.
 
 ```ts
-type AuthFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+type FetchLike = typeof globalThis.fetch;
+
+type AuthFetch = (...args: Parameters<FetchLike>) => Promise<Response>;
 ```
+
+The parameters are derived from the platform's own `fetch` rather than written out: `RequestInfo`
+exists in the DOM lib but not in `@types/node`, so naming it here would make the published
+declarations fail to compile for a Node consumer who has not enabled `"lib": ["DOM"]`.
 
 ### Options
 
