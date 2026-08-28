@@ -1,19 +1,26 @@
 {
   "name": "fetch-auth-refresh",
-  "version": "0.0.0",
-  "description": "A tiny, dependency-free fetch wrapper that adds concurrency-safe (single-flight) authentication token refresh.",
+  "version": "0.1.0",
+  "description": "A zero-runtime-dependency authentication wrapper for native fetch with concurrency-safe single-flight token refresh.",
   "keywords": [
     "fetch",
     "auth",
     "authentication",
+    "authorization",
     "token",
     "refresh",
+    "access-token",
+    "bearer",
     "single-flight",
     "401",
+    "esm",
     "typescript"
   ],
   "license": "MIT",
-  "author": "igkougkousis01",
+  "author": {
+    "name": "igkougkousis01",
+    "url": "https://github.com/igkougkousis01"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/igkougkousis01/fetch-auth-refresh.git"
@@ -35,7 +42,9 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
+    "src",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "engines": {
@@ -47,7 +56,9 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+    "verify": "npm run typecheck && npm test && npm run build",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

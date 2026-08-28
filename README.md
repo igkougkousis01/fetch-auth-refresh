@@ -1,7 +1,7 @@
 # fetch-auth-refresh
 
-A small, zero-runtime-dependency TypeScript wrapper around the native Fetch API that adds
-concurrency-safe access token refresh.
+A zero-runtime-dependency authentication wrapper for native `fetch` with concurrency-safe
+single-flight token refresh.
 
 ```
 request → attach token → fetch → not an auth failure? return it
@@ -9,323 +9,317 @@ request → attach token → fetch → not an auth failure? return it
                                              → retry exactly once with the fresh token
 ```
 
-## The problem
+## Status
 
-Almost every app that talks to an authenticated HTTP API ends up rewriting the same logic:
+**v0.1.0 — first release, not yet published to npm.** The library is feature-complete for what it
+claims to do and covered by 78 tests, but the public API has not been used in anger by anyone but
+its author.
 
-1. Attach the current access token to each request.
-2. Notice that the server rejected the token (usually `401`).
-3. Refresh the token.
-4. Retry the original request.
+While the version is `0.x`, a **minor bump may contain breaking changes**. Pin an exact version if
+that matters to you. The surface is deliberately tiny — one function and six types — so the blast
+radius of a change is small.
 
-Written by hand, this logic tends to leak into every call site, or to grow into a bespoke HTTP
-client that has to be maintained forever. `fetch-auth-refresh` does exactly those four steps and
-nothing else.
+## Why this exists
 
-## The single-flight refresh problem
+The hard part of token refresh is not refreshing. It is refreshing *once*.
 
-The hard part is not refreshing. The hard part is refreshing *once*.
-
-A typical page loads several resources at the same time:
+A page loads several resources at the same time, all carrying the same access token. The token
+expires, and every one of them comes back `401` at roughly the same moment. A naive wrapper
+refreshes per failed request:
 
 ```
-GET /profile      ─┐
-GET /settings     ─┼─ all in flight with the same expired token
-GET /notifications─┘
+20 requests
+  → 20 × 401
+  → 20 refresh calls        ← the thundering herd
 ```
 
-When the token expires, all three come back `401` at roughly the same moment. A naive
-implementation refreshes per failed request, so one expired token produces three refresh calls.
+This library gives you:
 
-That is not just wasteful:
+```
+20 requests
+  → 20 × 401
+  → 1 refresh
+  → 20 retries
+```
 
-- **Refresh tokens are often single-use.** Many providers rotate the refresh token on every use
-  and invalidate the previous one. Three parallel refreshes mean two of them present a token that
-  a sibling call has already consumed — and the user gets logged out.
-- **Rate limits and lockouts.** Auth endpoints are commonly the most aggressively rate-limited
-  ones in a system.
-- **Last-writer-wins races.** Three refreshes produce three tokens; whichever finishes last is the
+That difference is not just about wasted calls:
+
+- **Refresh tokens are often single-use.** Many providers rotate the refresh token on every use and
+  invalidate the previous one. Twenty parallel refreshes mean nineteen of them present a token a
+  sibling call has already consumed — and the user gets logged out.
+- **Auth endpoints are the most aggressively rate-limited ones** in most systems.
+- **Last-writer-wins races.** Twenty refreshes produce twenty tokens; whichever finishes last is the
   one stored, and requests retried with the others fail.
 
-**Single-flight** means: the first authentication failure starts the refresh, and every other
-request that fails during that window *joins the same in-flight operation* instead of starting a
-new one. One refresh call, one new token, every waiting request retried with it.
+## Features
 
-100 simultaneous requests that all receive a `401` produce exactly **one** `refreshToken()` call.
+- **Single-flight refresh** — at most one `refreshToken()` call in flight per client, however many
+  requests fail at once.
+- **Late failures still share it** — a failure classified *after* the refresh already settled joins
+  that refresh's result instead of starting its own, so an asynchronous `isAuthFailure` cannot
+  degrade single-flight into a sequential stampede.
+- **Requests that start mid-refresh wait**, then are sent once with the fresh token, instead of
+  being sent with a credential the client already knows was rejected.
+- **One retry maximum**, guaranteed by the shape of the code rather than by a counter.
+- **Abort isolation** — aborting one request never cancels the refresh other requests depend on.
+- **Response clone safety** — callbacks receive clones, so the response you get back is never
+  consumed.
+- **Nothing of yours is mutated** — your `Request` and `Headers` objects are left untouched.
+- **Zero runtime dependencies**, ESM-only, fully typed.
 
-## API
+## Installation
+
+> **Not yet published.** This command is what installation *will* look like; it does not work today.
+> Until the first publish, install from the repository.
+
+```bash
+npm install fetch-auth-refresh
+```
+
+Requires Node.js >= 22, or any browser with the Fetch API.
+
+## Quick start
 
 ```ts
 import { createAuthFetch } from 'fetch-auth-refresh';
 
+let accessToken: string | null = null;
+
 const authFetch = createAuthFetch({
-  // Return the token to attach, or null to send the request unauthenticated.
-  getToken: () => localStorage.getItem('access_token'),
+  getToken: () => accessToken,
 
-  // Obtain a fresh token and return it. At most one call is in flight at a time.
-  // Throw if the session cannot be recovered.
   refreshToken: async () => {
-    const response = await fetch('/auth/refresh', { method: 'POST' });
-    if (!response.ok) throw new Error('Session expired');
+    const response = await fetch('/auth/refresh', {
+      method: 'POST',
+      credentials: 'include',
+    });
 
-    const { accessToken } = await response.json();
-    localStorage.setItem('access_token', accessToken);
+    if (!response.ok) {
+      throw new Error('Refresh failed');
+    }
+
+    const data = await response.json();
+    accessToken = data.accessToken;
+
     return accessToken;
   },
-
-  // Optional. Defaults to `response.status === 401`. May be async.
-  isAuthFailure: (response) => response.status === 401,
-
-  // Optional. Called once per unrecoverable authentication outcome.
-  onAuthFailure: () => {
-    localStorage.removeItem('access_token');
-    redirectToLogin();
-  },
-
-  // Optional. Defaults to `Authorization: Bearer <token>`.
-  attachToken: (request, token) => {
-    request.headers.set('X-Api-Key', token);
-    return request;
-  },
-
-  // Optional. Defaults to the global `fetch`, captured when the client is created.
-  fetch: undiciFetch,
 });
 
-// Same signature as fetch.
-const response = await authFetch('/api/profile');
+const response = await authFetch('/api/me');
 ```
 
-`refreshToken()` returns the new token rather than writing it somewhere the library reads back.
-That keeps the retry from racing against the consumer's storage, and keeps persistence optional.
-**Refresh failure is a rejection, not a return value** — there is no `null` sentinel, so a resolved
-value is always a usable token.
+`authFetch` has the same signature as `fetch`. `refreshToken()` **returns** the new token rather
+than writing it somewhere the library reads back, which keeps the retry from racing against your
+storage. **Failure is a rejection, not a sentinel** — throw, and a resolved value is always a usable
+token.
 
-## Behaviour
+More in [`examples/`](./examples): [`basic.ts`](./examples/basic.ts) and
+[`custom-auth-failure.ts`](./examples/custom-auth-failure.ts).
 
-### Single-flight refresh
+## Concurrency behaviour
 
-One shared promise per client. The first request to classify a response as an authentication
-failure starts the refresh; every other request that fails while it is pending joins that same
-operation. All of them are retried with the same resolved token. When the operation settles the
-slot is cleared, so a later, independent expiry starts a new refresh.
-
-Failures do not all arrive at the same instant, so "while it is pending" is not enough on its own.
-Refresh operations are numbered, and a request records the current number alongside the token it is
-sent with. That single piece of request-local state decides what its failure gets:
-
-> **An authentication failure may consume the result of a refresh that completed *after* its
-> credential was obtained, and never the result of one that completed *before*.**
-
-A refresh from before was replacing some earlier credential, not this one, so reusing it would
-answer the failure with a token no newer than the one just rejected. The rule separates the two
-cases that are indistinguishable by timing alone:
-
-| Situation | Generation | What happens |
-| --------- | ---------- | ------------ |
-| Failed alongside the wave that already refreshed, but classified late | a refresh completed after its credential | takes that refresh's result — no new refresh |
-| Used the refreshed token and was rejected anyway | no refresh has completed since its credential | starts a new refresh |
-
-Without it, 100 failures classified one at a time — an async `isAuthFailure` that reads a response
-body is enough — would produce one refresh each, in sequence. The library therefore keeps the most
-recent refresh result (its token, or its error) for exactly this purpose. It is never used to
-authenticate a *new* request; `getToken()` remains the only source for those.
-
-The completed-refresh check is made **before** joining an operation that is currently running, and
-that order matters. A refresh in flight may have been started by a newer credential than a given
-request ever held — one it never used — so joining it would make that request wait for, and fail
-with, an outcome belonging to a generation ahead of its own, while the refresh that actually
-replaced its credential has already finished.
-
-### Requests that start during a refresh
-
-A request that begins while a refresh is already in flight is **not** sent with a credential the
-client already knows was rejected. It waits for the in-flight refresh, then is sent **once**, with
-the refreshed token:
+The first failure starts the refresh; everything else joins it.
 
 ```
-request A → 401 → starts refresh ─────────┐
-                                          │
-request B starts during refresh ──────────┤
-request C starts during refresh ──────────┤
-                                          ↓
-                                   refreshed token
-                                     ↙    ↓    ↘
-                                 retry A  send B  send C
+A ──401─┐
+B ──401─┼──→ [ one refreshToken() ] ──→ token
+C ──401─┘            │
+                     ├──→ retry A
+                     ├──→ retry B
+                     └──→ retry C
 ```
 
-B and C never produce an avoidable extra `401`. `getToken()` is not called for them — the token
-that the refresh returned is by definition newer than anything storage can offer.
-
-### One retry maximum
-
-A logical request is retried at most once because of authentication:
+A request that *starts* while a refresh is running does not fire off a doomed request first — it
+waits, then is sent once, already authenticated:
 
 ```
-request → 401 → refresh succeeds → retry → 401 → that 401 is returned to you
+A ──401──→ starts refresh ─────────┐
+                                   │
+B starts during refresh ───────────┤
+C starts during refresh ───────────┤
+                                   ↓
+                            refreshed token
+                             ↙     ↓      ↘
+                        retry A  send B  send C
 ```
 
-The retry is a straight-line fall-through in the implementation, not a loop and not a recursive
-call into `authFetch`, so `401 → refresh → 401 → refresh → …` is structurally impossible.
+`getToken()` is not consulted for B and C: the token the refresh returned is by definition newer
+than anything your storage can offer, and reading storage there would reintroduce the
+read-after-write race that returning the token was designed to avoid.
 
-The retry's response is returned **unclassified**: `isAuthFailure` sees each request's response once,
-on the first attempt only.
+## API
 
-### Refresh failure
+### `createAuthFetch(options): AuthFetch`
 
-If `refreshToken()` rejects, **every request awaiting that operation rejects with that same
-error** — including requests that were waiting to be sent and never reached the network, and those
-whose failure was classified just after the refresh gave up. None of them starts a replacement
-refresh. The shared slot is then cleared, so the next authentication
-failure begins a fresh operation.
+Returns a `fetch`-compatible function. Throws a `TypeError` at construction time if no transport is
+available.
 
 ```ts
-try {
-  await authFetch('/api/profile');
-} catch (error) {
-  // The error your refreshToken() threw, unchanged.
+type AuthFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+```
+
+### Options
+
+| Option | Signature | Required |
+| ------ | --------- | -------- |
+| [`getToken`](#gettoken) | `() => string \| null \| Promise<string \| null>` | yes |
+| [`refreshToken`](#refreshtoken) | `(context: RefreshContext) => Promise<string>` | yes |
+| [`isAuthFailure`](#isauthfailure) | `(response: Response, request: Request) => boolean \| Promise<boolean>` | no |
+| [`attachToken`](#attachtoken) | `(request: Request, token: string) => Request \| Promise<Request>` | no |
+| [`onAuthFailure`](#onauthfailure) | `(context: AuthFailureContext) => void \| Promise<void>` | no |
+| [`fetch`](#fetch) | `typeof globalThis.fetch` | no |
+
+#### `getToken`
+
+Returns the token to attach, or `null` to send the request without credentials. Called once per
+outgoing request the library authenticates — but **not** when the caller supplied their own
+`Authorization` header, and **not** for a request that waited on a refresh or is being retried after
+one. Those use the token `refreshToken()` returned.
+
+#### `refreshToken`
+
+Obtains a fresh token and resolves with it. **At most one call is in flight at a time.**
+
+Receives a `RefreshContext`:
+
+```ts
+interface RefreshContext {
+  readonly request: Request;                  // the request that started this refresh, as sent
+  readonly response: Response;                // a clone of the response classified as a failure
+  readonly rejectedToken: string | null;      // the credential the server refused
 }
 ```
 
-### `onAuthFailure`
+When several requests fail at once they share one refresh, so `request` is the one that *started*
+it, not each of them. It has already been sent, so treat it as read-only metadata (URL, method,
+headers). `rejectedToken` is useful for no-opping when another part of your app has already rotated
+the token.
 
-Fires **once per failed shared refresh**, and at no other time. 100 requests joining one refresh
-that rejects produce exactly one call, so a logout or a redirect implemented there runs once.
+Reject to signal that the session cannot be recovered. Every request attached to the operation then
+rejects with that same error, and none of them starts a replacement refresh.
 
-It means one specific thing: *the session could not be recovered*. That is deliberately narrower
-than "a request was unauthorized", because the two are different events:
+#### `isAuthFailure`
 
-| Event | Signal |
-| ----- | ------ |
-| The refresh operation failed | `onAuthFailure`, once, and every attached request rejects |
-| A request is still unauthorized after a *successful* refresh | the `401` is returned to that caller; no callback |
+Classifies a response as an authentication failure. Defaults to `response.status === 401`.
 
-A retry that comes back `401` does not mean the refresh failed — it succeeded, and the server
-simply refused that particular request with a valid credential. That can be a scope or permission
-problem on one endpoint, and turning it into a global logout would be wrong. It is left to the
-caller, who has the response.
-
-If your `onAuthFailure` throws, the error is **swallowed** and the original refresh error is what
-every waiting request receives. Notification is a side channel: it must never replace, reshape, or
-delay the failure it was called to report. The behaviour is the same in every runtime — nothing is
-routed to `reportError` or any other host-specific hook — so if you need to observe an error from
-your own callback, catch it inside the callback.
-
-### Responses are never consumed by the library
-
-Every `Response` handed to a consumer callback — `isAuthFailure`, and the `response` field of
-`RefreshContext` and `AuthFailureContext` — is a `response.clone()`. You can read the full body in
-a callback and the caller still receives an unconsumed response:
+Called **once per request, on its first attempt only**. The `response` is a clone, so reading its
+body here can never consume the response the caller receives:
 
 ```ts
 isAuthFailure: async (response) => {
   if (response.status !== 400) return false;
-  const { code } = await response.json(); // safe: this is a clone
+  const { code } = await response.json();  // safe: this is a clone
   return code === 'token_expired';
-};
+},
 ```
 
-### Body replay
+Only classification belongs here. Whether to refresh, and how many times, is the library's decision.
 
-A retry needs the request body a second time, so a replay copy is taken with `Request.clone()`
-**before** the first attempt reaches the transport and **before** a token is attached — a retry
-therefore never carries the credential that was just rejected, even with an `attachToken` that
-appends rather than replaces.
+#### `attachToken`
 
-Tested replay cases: `GET`, `POST` with a text body, `POST` with a JSON body, a `Request` object as
-input, and a `ReadableStream` body.
+Attaches a token to an outgoing request and returns the request to send. Defaults to
+`Authorization: Bearer <token>`.
 
-Two limitations worth knowing:
-
-- **A stream body is replayed by teeing it.** `clone()` on a `ReadableStream` body buffers the
-  unread branch in memory for the duration of the first attempt. Replay is correct, but for a large
-  streamed upload it is not free.
-- **If the platform cannot produce a replay copy, the request is sent once and its response is
-  returned unchanged** — no classification, no refresh, no retry. The library never retries with an
-  empty or partially-consumed body. In practice `clone()` succeeds for every body type a freshly
-  constructed `Request` can hold, so this is a guard rather than a common path.
-
-A `Request` you pass in that is already consumed (`bodyUsed === true`) makes the native `Request`
-constructor throw `TypeError: unusable`, before this library sees it.
-
-### AbortSignal
-
-Cancellation belongs to the individual request; the shared refresh belongs to the client. They stay
-independent:
-
-| When you abort                       | What happens                                            |
-| ------------------------------------ | ------------------------------------------------------- |
-| Before the request is sent           | Rejects with your reason; nothing is sent, `getToken()` is not called |
-| During the initial fetch             | Rejects with your reason; no refresh is started         |
-| While waiting for the shared refresh | That request rejects and is **never** retried           |
-| After the refresh, before the retry  | Rejects with your reason; the retry is never sent       |
-| During the retry                     | Rejects with your reason                                |
-
-**Aborting one waiter never cancels the shared refresh** — other requests are still depending on
-it, and they are retried normally.
-
-### Caller-provided `Authorization`
-
-If the request already carries an `Authorization` header, the library sends it untouched and stays
-out of the **entire** authentication lifecycle: no `getToken()`, no `attachToken()`, no
-classification of its `401`, no `refreshToken()`, no retry. That request is the caller's to
-authenticate.
+This is the single credential-attachment path — used for the initial request, for a request that
+waited on a refresh, and for a retry. The `request` is always one the library constructed, never
+yours, so mutating its headers in place is safe:
 
 ```ts
-// Sends `Basic …`. A 401 comes straight back to you.
-await authFetch('/api/thing', { headers: { Authorization: 'Basic ' + basic } });
+attachToken: (request, token) => {
+  request.headers.set('X-Api-Key', token);
+  return request;
+},
 ```
 
-### Transport resolution
+Not called when there is no token, or when the caller set their own `Authorization` header.
 
-The transport is resolved **once, when the client is created**, and it is client configuration
-rather than per-request state — a refresh spans several requests, and resolving `globalThis.fetch`
-per call would let a mid-flight swap split one logical operation across two transports. A missing
-transport therefore throws from `createAuthFetch()` rather than from the first request. If you
-install a `fetch` polyfill, install it before creating the client, or pass it as `fetch`.
+#### `onAuthFailure`
 
-### Fetch semantics
+Called when `refreshToken()` rejected — **once per failed shared refresh**, never once per waiting
+request. A hundred requests joining one failed refresh produce exactly one call, so a logout
+implemented here runs once.
 
-Input is normalised with the native `Request` constructor, so the platform — not this library —
-decides how method, headers, body, credentials, mode, cache, redirect, and signal are carried over.
-Two consequences are worth knowing, and both match plain `fetch`:
+```ts
+interface AuthFailureContext {
+  readonly request: Request;    // the request that started the failed refresh
+  readonly response: Response;  // a clone, safe to read
+}
+```
 
-- **Passing a `Request` hands over its body.** As with `fetch(request)`, the `Request` you pass is
-  left consumed (`bodyUsed === true`) and must not be reused. Pass `request.clone()` if you need
-  to keep it.
-- **`authFetch(request, { headers })` replaces the header list**, it does not merge it. That is
-  `new Request(request, init)` behaviour; the library adds no merging of its own.
+It cannot change the outcome of a request. If it throws, the error is swallowed and the original
+refresh error is what waiting requests receive.
 
-Your `Request` and `Headers` objects are never mutated: the token is attached to a `Request` the
-library constructed.
+#### `fetch`
 
-Note that a relative URL such as `/api/profile` needs a document base, so it works in a browser but
-throws in Node — that is the native `Request` constructor, not this library.
+The underlying transport. Defaults to the global `fetch`, bound to `globalThis`, and resolved
+**once when the client is created** — not per request. A refresh spans several requests, and
+resolving the global per call would let a mid-flight swap split one logical operation across two
+transports. If you install a `fetch` polyfill, install it before creating the client, or pass it
+here.
 
-## What this library is not
+## Important semantics
 
-- **Not a JWT library.** Tokens are opaque strings. Nothing is decoded, parsed, or checked for
-  expiry — there is no proactive refresh before a token expires, only reactive refresh after the
-  server rejects it.
-- **Not an Axios replacement.** It wraps native `fetch` and returns a function with the same
-  signature. Standard `Request`, `Response`, `Headers`, `RequestInit`, and `AbortSignal` are used
-  throughout — no custom request or response objects, no interceptor pipeline.
-- **Not a token store.** Where tokens live and how they are persisted is entirely the consumer's
-  concern. The only token the library retains is the one the most recent refresh returned, and only
-  so that straggling failures from the same cohort can share it rather than trigger another
-  refresh; new requests always come from `getToken()`.
-- **Not a retry engine.** No backoff, no timers, no retries for network errors or `5xx`. Exactly
-  one retry, and only for authentication.
-- **Not tied to an auth provider.** No provider SDKs, no assumptions about grant types.
-- **Not cross-tab.** Coordination is per client instance, within one JavaScript realm.
+**A caller-supplied `Authorization` header bypasses everything.** Not just "the header is not
+overwritten": no `getToken`, no `attachToken`, no classification, no refresh, no retry. That request
+is yours to authenticate.
 
-**Zero runtime dependencies.** Dev dependencies (TypeScript, Vitest) exist, but nothing is shipped
-alongside the package.
+**One retry maximum.** `401 → refresh → retry → 401` returns that second `401` to you. The retry is
+a fall-through in the implementation, not a loop and not a recursive call, so
+`401 → refresh → 401 → refresh → …` is structurally impossible. The retry's response is returned
+**unclassified**.
 
-## Requirements
+**Single-flight, and it survives late classification.** Refresh operations are numbered, and each
+request records the current number alongside the token it was sent with. A failure may consume the
+result of a refresh that completed *after* its credential was obtained, and never one that completed
+*before*. That rule separates a straggler from the same wave (takes the completed refresh's result)
+from a request that genuinely used the refreshed token and was rejected anyway (starts a new
+refresh) — decided from request-local state, never from timing.
 
-- Node.js >= 22 (native `fetch`), or any browser with the Fetch API.
-- ESM only.
+**Requests arriving mid-refresh wait** and are then sent once with the fresh token.
+
+**Aborting is per request.** A request's signal abandons it at any stage — before it is sent, during
+the fetch, while waiting on the refresh, between the refresh and the retry, and during the retry —
+and rejects with your reason. A request aborted while waiting on a refresh is **never** retried.
+**Aborting one waiter never cancels the shared refresh**; other requests still get their retry.
+
+**Refresh rejection propagates unchanged.** `authFetch()` rejects with your own error, for every
+request attached to that operation, including ones that were waiting to be sent and never reached
+the network. The shared slot is then cleared, so the next authentication failure begins a fresh
+operation.
+
+**Responses handed to callbacks are always clones.** The response you receive always has
+`bodyUsed === false`.
+
+**Request bodies are replayed by cloning.** The replay copy is taken before the first send and
+before a token is attached, so a retry never carries the credential that was just rejected — even
+with an `attachToken` that appends rather than replaces. Two things follow: a `ReadableStream` body
+is replayed by teeing it, which **buffers the unread branch in memory** for the duration of the
+first attempt, so a large streamed upload is not free; and if the platform cannot produce a replay
+copy, the request is sent once and its response returned unchanged rather than retried with a
+consumed body.
+
+## Compatibility
+
+- **Node.js >= 22.** The library itself needs only the Web Platform Fetch APIs (`fetch`, `Request`,
+  `Response`, `Headers`, `AbortSignal`), which Node has had since 18. The floor is set by support
+  policy rather than by an API: Node 18 and 20 are both past end-of-life, so 22 is the oldest line
+  still receiving security fixes. Nothing in the emitted code prevents it from running on 18 or 20;
+  those versions are simply not tested or supported.
+- **Browsers:** any with the Fetch API. No DOM APIs beyond `fetch` are used — no `localStorage`, no
+  `window`, no timers.
+- **ESM only.** There is no CommonJS build.
+- **Relative URLs need a document base**, so `/api/me` works in a browser and throws in Node. That is
+  the native `Request` constructor, not this library.
+- **`authFetch(request, { headers })` replaces the header list**, it does not merge — that is
+  `new Request(request, init)` behaviour. Likewise, passing a `Request` hands over its body, leaving
+  your object with `bodyUsed === true`, exactly as `fetch(request)` does.
+
+## What this is not
+
+Not a JWT library (tokens are opaque strings; no decoding, no proactive expiry). Not an Axios
+replacement (no interceptors, no custom request/response types). Not a token store (persistence is
+yours). Not a retry engine (no backoff, no `5xx` retries). Not tied to an auth provider. Not
+cross-tab — coordination is per client instance, within one JavaScript realm.
 
 ## Development
 
@@ -336,9 +330,14 @@ npm test
 npm run build
 ```
 
+`npm run verify` runs all three.
+
 ## Documentation
 
-- [Architecture](./docs/architecture.md) — design principles and the request flow.
+- [Architecture](./docs/architecture.md) — the concurrency model, the generation invariant, and the
+  reasoning behind each design decision.
+- [Changelog](./CHANGELOG.md)
+- [Security policy](./SECURITY.md)
 
 ## License
 

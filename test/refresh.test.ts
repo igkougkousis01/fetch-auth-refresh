@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { createAuthFetch } from '../src/index.js';
-import type { AuthFetchOptions, FetchLike } from '../src/index.js';
+import type { AuthFetchOptions, FetchLike, RefreshContext } from '../src/index.js';
 
 const URL_ = 'https://api.test/resource';
 
@@ -224,6 +224,31 @@ describe('authentication failure classification', () => {
     expect(bodies).toEqual(['failure-detail']);
     expect(response.bodyUsed).toBe(false);
     await expect(response.text()).resolves.toBe('retry-body');
+  });
+
+  // `rejectedToken` is documented as `null` when the request went out without
+  // credentials. Only the `'stale'` case was covered, so the null branch — the
+  // one a consumer tests against to decide whether anything was rejected at
+  // all — was never asserted.
+  it('reports rejectedToken as null when the request was sent unauthenticated', async () => {
+    const transport = createTransport(refreshAwareHandler('fresh'));
+    const contexts: RefreshContext[] = [];
+    const refreshToken = async (context: RefreshContext): Promise<string> => {
+      contexts.push(context);
+      return 'fresh';
+    };
+    const authFetch = createAuthFetch(
+      options({ getToken: () => null, refreshToken, fetch: transport.fetch }),
+    );
+
+    await authFetch(URL_, { method: 'POST', body: 'payload' });
+
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0]?.rejectedToken).toBeNull();
+    // The request handed over is the library's own, as it was sent.
+    expect(contexts[0]?.request.url).toBe(URL_);
+    expect(contexts[0]?.request.method).toBe('POST');
+    expect(contexts[0]?.request.headers.has('authorization')).toBe(false);
   });
 
   it('gives onAuthFailure a clone it can read in full (29)', async () => {
