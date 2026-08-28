@@ -8,6 +8,12 @@ dist/
 coverage/
 *.tsbuildinfo
 
+# packaging artefacts
+*.tgz
+
+# local agent/editor settings
+.claude/settings.local.json
+
 # logs
 *.log
 npm-debug.log*

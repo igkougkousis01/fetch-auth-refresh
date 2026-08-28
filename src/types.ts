@@ -18,11 +18,16 @@ export type AccessToken = string;
 /** A `fetch`-compatible function. Defaults to the global `fetch`. */
 export type FetchLike = typeof globalThis.fetch;
 
-/** The function returned by {@link createAuthFetch}. Drop-in for `fetch`. */
-export type AuthFetch = (
-  input: RequestInfo | URL,
-  init?: RequestInit,
-) => Promise<Response>;
+/**
+ * The function returned by {@link createAuthFetch}. Drop-in for `fetch`.
+ *
+ * The parameters are derived from the platform's own `fetch` rather than
+ * written out, because the spelling of its first parameter is not portable:
+ * `RequestInfo` exists in the DOM lib but not in `@types/node`, so naming it
+ * here would make the published declarations fail to compile for a Node
+ * consumer who has not enabled `"lib": ["DOM"]`.
+ */
+export type AuthFetch = (...args: Parameters<FetchLike>) => Promise<Response>;
 
 /**
  * Information about the authentication failure that triggered a refresh which

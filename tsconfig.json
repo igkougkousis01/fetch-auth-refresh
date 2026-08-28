@@ -6,6 +6,12 @@
     "moduleResolution": "NodeNext",
     "types": [],
 
+    // Lets `examples/` import the package by its published name while still
+    // typechecking against the local source.
+    "paths": {
+      "fetch-auth-refresh": ["./src/index.ts"]
+    },
+
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
@@ -22,5 +28,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src", "test", "vitest.config.ts"]
+  "include": ["src", "test", "examples", "vitest.config.ts"]
 }

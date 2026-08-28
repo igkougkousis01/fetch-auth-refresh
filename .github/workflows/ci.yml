@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   test:
+    name: test (node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -17,9 +18,9 @@ jobs:
         node-version: [22.x, 24.x]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
@@ -31,3 +32,38 @@ jobs:
       - run: npm test
 
       - run: npm run build
+
+  package:
+    name: package
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - run: npm ci
+
+      # `prepack` builds, so this packs exactly what a publish would ship. Its
+      # own directory, so the verifier finds one tarball and not a stray.
+      - name: Pack
+        run: |
+          mkdir -p "$RUNNER_TEMP/tarball"
+          npm pack --pack-destination "$RUNNER_TEMP/tarball"
+
+      # A published package is only as good as what a consumer can actually
+      # import, so install the tarball into a scratch project and use it from
+      # both plain JavaScript and TypeScript.
+      - name: Verify the packed tarball from a consumer project
+        run: node scripts/verify-package.mjs "$RUNNER_TEMP/tarball"
+
+      - name: Fail if packing left artefacts in the working tree
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Working tree is dirty after packing:"
+            git status --porcelain
+            exit 1
+          fi

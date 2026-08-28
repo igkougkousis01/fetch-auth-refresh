@@ -20,8 +20,7 @@ caller
               rejects → onAuthFailure once for the operation, then every waiter
                         rejects with that error
               token   → retry exactly once with it
-                        → retry also an auth failure? onAuthFailure for this request
-                        → return the retry response
+                        → return the retry response unclassified, whatever it is
 ```
 
 Every request performs a bounded amount of work: at most two `fetch` calls and at most a share in
@@ -60,8 +59,11 @@ its own cleanup on abort.
 
 ### Acquire and release
 
+Reduced to the promise slot alone — the generation check that precedes it in the real function is
+introduced two sections down, and the full version appears there:
+
 ```ts
-function acquireRefresh(request, response, rejectedToken) {
+function acquireRefresh(/* … */ request, response, rejectedToken) {
   if (refreshPromise !== null) return refreshPromise;   // join
 
   const started = runRefresh(request, response, rejectedToken);
@@ -91,14 +93,15 @@ new operation — which is the desired behaviour, not a race.
 A shared promise coordinates requests that are failing *at the same time*. Failures are not
 delivered at the same time.
 
-The 100 requests in the README's motivating example are sent with one expired token and all come
-back `401`, but each one is then classified independently — and classification can be
+Take the README's thundering-herd example and scale it to 100 requests: they are sent with one
+expired token and all come back `401`, but each one is then classified independently — and classification can be
 asynchronous, because `isAuthFailure` is allowed to read the response body. The first failure
 starts the refresh; the refresh finishes; the slot is cleared. Then the second failure is
 classified, finds nothing in flight, and starts its own refresh. Then the third. One expired token
 produces 100 sequential refreshes, which is precisely the failure mode this library exists to
 prevent — and it is invisible to a test that responds to all 100 requests before letting the
-refresh settle. It was caught by running the built package against a real HTTP server.
+refresh settle. It was caught during development, by a throwaway harness that drove the built
+package against a real HTTP server (see [Testing approach](#testing-approach)).
 
 The fix is to give "the same cohort" a definition that outlives the promise. A request records the
 current generation next to the token it is sent with:
@@ -159,7 +162,8 @@ actually replaced its own. B takes refresh #1's result and retries with token-2;
 too, B's `401` is returned, because one retry is the limit. It does not start a refresh #3.
 
 Checking the in-flight slot first is exactly the bug this ordering fixes — it was found by
-reproducing the sequence above against the built package.
+reproducing the sequence above against the built package, and `scenario 3` and `scenario 3b` in
+`test/refresh.test.ts` now pin it deterministically.
 
 ### Where the snapshot is taken
 
@@ -366,6 +370,10 @@ The invariants are checked by mutation: reordering the two checks, weakening `>`
 the generation shortcut, moving the snapshot before `getToken()`, and dropping the generation stamp
 from a failed refresh each break at least one test.
 
-The unit suite is complemented by running the built ESM output against a real `node:http` server
-with the real global `fetch`, which is how the straggler bug above was found: a stand-in transport
-that completes when the test says so can hide timing that a real network exposes.
+Both bugs described above were found with a throwaway harness that ran the built ESM output
+against a real `node:http` server with the real global `fetch` — a stand-in transport that completes
+only when the test says so can hide timing that a real network exposes. That harness was development
+scaffolding and is **not** part of the repository; it was not a regression test, and the behaviour it
+uncovered is pinned by the deterministic tests above instead. CI covers the built artefact from the
+other direction: it packs the tarball, installs it into a scratch consumer project, and runs the
+package's own `.d.ts` through `tsc` and its ESM output through Node.
