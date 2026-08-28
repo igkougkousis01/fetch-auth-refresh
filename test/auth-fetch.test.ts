@@ -305,23 +305,18 @@ describe('createAuthFetch', () => {
     expect(received).not.toBe(callerRequest);
   });
 
-  it('returns a 401 unchanged and triggers no refresh behaviour', async () => {
-    const unauthorized = new Response('nope', { status: 401 });
-    const fake = createFakeFetch(unauthorized);
-    const isAuthFailure = vi.fn(() => true);
+  it('returns a non-auth-failure response unchanged and refreshes nothing', async () => {
+    const forbidden = new Response('nope', { status: 403 });
+    const fake = createFakeFetch(forbidden);
     const onAuthFailure = vi.fn();
-    const authFetch = createAuthFetch(
-      options({ isAuthFailure, onAuthFailure, fetch: fake.fetch }),
-    );
+    const authFetch = createAuthFetch(options({ onAuthFailure, fetch: fake.fetch }));
 
     const response = await authFetch('https://api.test/private');
 
-    expect(response).toBe(unauthorized);
-    expect(response.status).toBe(401);
+    expect(response).toBe(forbidden);
     expect(response.bodyUsed).toBe(false);
     await expect(response.text()).resolves.toBe('nope');
     expect(neverRefresh).not.toHaveBeenCalled();
-    expect(isAuthFailure).not.toHaveBeenCalled();
     expect(onAuthFailure).not.toHaveBeenCalled();
     expect(fake.calls).toHaveLength(1);
   });
@@ -378,10 +373,24 @@ describe('createAuthFetch', () => {
     expect(fake.sent().headers.get('authorization')).toBe('Bearer from-this');
   });
 
-  it('reports a missing transport clearly', async () => {
+  // The transport is client configuration, resolved once at construction, so a
+  // missing one is a construction-time error rather than a per-request surprise.
+  it('reports a missing transport clearly, at construction time', () => {
     vi.stubGlobal('fetch', undefined);
+
+    expect(() => createAuthFetch(options())).toThrow(/No fetch implementation available/);
+  });
+
+  it('captures the transport at creation and ignores a later global swap', async () => {
+    const atCreation = vi.fn(async () => new Response('first'));
+    vi.stubGlobal('fetch', atCreation);
     const authFetch = createAuthFetch(options());
 
-    await expect(authFetch(URL_)).rejects.toThrow(/No fetch implementation available/);
+    const afterCreation = vi.fn(async () => new Response('second'));
+    vi.stubGlobal('fetch', afterCreation);
+    await authFetch(URL_);
+
+    expect(atCreation).toHaveBeenCalledTimes(1);
+    expect(afterCreation).not.toHaveBeenCalled();
   });
 });
