@@ -8,7 +8,7 @@ While the version is `0.x`, a minor bump may contain breaking changes.
 
 ## [Unreleased]
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-08-28
 
 First release. Everything below is the initial feature set, not a change from a
 previous version.
